@@ -62,7 +62,7 @@ $ go run cmd/gateway/main.go 2>&1 | grep "X-Request-ID"
 - `/v1/*` → `http://localhost:8001` (legacy API)
 - `/v3/*` → `http://localhost:8002` (current API)
 - `/v4/*` → `http://localhost:8003` (beta API)
-- `/*` (no version prefix) → `http://localhost:8002` (default to current)
+- Unrecognized path → 404 (no silent fallback)
 - Implement your own prefix matcher (map[string]http.Handler)
 - **Path stripping**: `/v3/messages` → upstream sees `/messages` (not `/v3/messages`)
 
@@ -76,11 +76,11 @@ $ go run cmd/gateway/main.go 2>&1 | grep "X-Request-ID"
 # Start test upstreams
 $ go run test/upstreams.go
 
-$ curl http://localhost:30420/v1/domains    # → upstream-8001, sees /domains
-$ curl http://localhost:30420/v3/messages   # → upstream-8002, sees /messages
-$ curl http://localhost:30420/v4/webhooks   # → upstream-8003, sees /webhooks
-$ curl http://localhost:30420/messages      # → upstream-8002 (default)
-$ curl http://localhost:30420/v2/legacy     # → 404 (version not supported)
+$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v1/domains    # → upstream-8001, sees /domains
+$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v3/messages   # → upstream-8002, sees /messages
+$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v4/webhooks   # → upstream-8003, sees /webhooks
+$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/messages      # → upstream-8002 (default)
+$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v2/legacy     # → 404 (version not supported)
 ```
 
 **Constraint**: Router reloadable via HTTP POST `/admin/reload` (no restart for adding new versions).
