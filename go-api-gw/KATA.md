@@ -62,7 +62,7 @@ $ go run cmd/gateway/main.go 2>&1 | grep "X-Request-ID"
 - `/v1/*` → `http://localhost:8001` (legacy API)
 - `/v3/*` → `http://localhost:8002` (current API)
 - `/v4/*` → `http://localhost:8003` (beta API)
-- Unrecognized path → 404 (no silent fallback)
+- `/*` (no version prefix) → `http://localhost:8002` (default to current)
 - Implement your own prefix matcher (map[string]http.Handler)
 - **Path stripping**: `/v3/messages` → upstream sees `/messages` (not `/v3/messages`)
 
@@ -76,12 +76,11 @@ $ go run cmd/gateway/main.go 2>&1 | grep "X-Request-ID"
 # Start test upstreams
 $ go run test/upstreams.go
 
-$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v1/domains    # → upstream-8001, sees /domains
-$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v3/messages   # → upstream-8002, sees /messages
-$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v4/webhooks   # → upstream-8003, sees /webhooks
-$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/messages      # → upstream-8002 (default)
-$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v2/legacy     # → 404 (version not supported)
-```
+curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v1/domains    
+curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v3/messages   
+curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v4/webhooks   
+curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/messages      
+curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v2/legacy   
 
 **Constraint**: Router reloadable via HTTP POST `/admin/reload` (no restart for adding new versions).
 
@@ -89,9 +88,36 @@ $ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v2/legacy     # �
 
 ---
 
-## Kata 004: SKIP
+## Kata 004: Middleware Refactor (45 min)
 
-Load balancing is infrastructure-level. Mailgun would use Envoy/HAProxy for this. Skip — not relevant to backend engineering interview.
+**Goal**: Move cross-cutting concerns out of the proxy and into the router so they apply to all requests.
+
+**Why for Mailgun**: Rate limiting, logging, and auth must fire even for requests that never reach an upstream (bad routes, unsupported versions). Putting them in the proxy means a bad actor can hammer `/v2/anything` unlogged and unthrottled.
+
+**Requirements**:
+- Move `stripForwardedHeaders`, `addRequestID`, `addForwardedFor` to router middleware
+- Move API key validation to router middleware
+- Move structured logging to router middleware (so 404s get logged too)
+- Proxy becomes a thin forwarder — only builds and sends the upstream request
+- Middleware should be composable: `func(http.Handler) http.Handler`
+
+**What You'll Learn**:
+- The middleware pattern in Go (`func(http.Handler) http.Handler`)
+- Why cross-cutting concerns belong at the outermost layer
+- How to chain middleware cleanly
+
+**Verification**:
+```bash
+# 404 routes should now appear in logs
+$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/v2/legacy
+# Check logs — should see a structured log entry with status 404
+
+# Auth should still work
+$ curl -v http://localhost:30420/v1/domains
+# < HTTP/1.1 401 Unauthorized
+```
+
+**Time estimate**: 45 minutes.
 
 ---
 
