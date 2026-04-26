@@ -7,7 +7,7 @@
     { }
 }:
 let
-  name = "quizlet";
+  name = "go-api-gw";
 
   tools = with pkgs; {
     cli = [
@@ -18,6 +18,7 @@ let
       go
       go-tools
       gopls
+      gcc
     ];
     scripts = pkgs.lib.attrsets.attrValues scripts;
   };
