@@ -1,211 +1,189 @@
-# Go API Gateway Katas
+# Go API Gateway Katas — Mailgun Interview Prep
 
-Raw HTTP proxy implementation. No frameworks. No `httputil.ReverseProxy` until Kata 003.
+Scoped for ~6-8 hours (Saturday evening → Sunday). Focus: API gateway patterns relevant to Mailgun's email API business.
 
 ---
 
-## Kata 001: Transparent Forward
+## Kata 001: Transparent Forward ✅ COMPLETE
 
-**Goal**: Build the dumbest possible HTTP proxy.
+**Goal**: Basic HTTP proxy with streaming.
+
+**Status**: Done. Tagged `kata-001`.
+
+---
+
+## Kata 002: Headers, Identity & API Auth (2 hours)
+
+**Goal**: Gateway semantics for API traffic (not WebSockets — irrelevant to email APIs).
+
+**Why for Mailgun**: Email APIs need request tracking, authentication, and audit logging for compliance.
 
 **Requirements**:
-- Listen on `:30420`
-- Accept any HTTP request
-- Forward to a hardcoded upstream (e.g., `http://httpbin.org` or local echo server)
-- Return upstream's response unchanged
-- Use `http.Client` + `io.Copy` — NOT `httputil.ReverseProxy`
+- Strip client-sent `X-Forwarded-*` headers (security hygiene)
+- Generate and inject `X-Request-ID` (UUID v4) for distributed tracing
+- Add `X-Forwarded-For` with actual client IP (audit trail)
+- **NEW**: Validate `X-API-Key` header — reject with 401 if missing/invalid (simulate Shopify integration auth)
+- Structured logging: `timestamp method path api_key status duration request_id`
 
 **What You'll Learn**:
-- Request/response body streaming (why buffering is death)
-- Header preservation quirks
-- The `Transfer-Encoding: chunked` reality
+- Header canonicalization pitfalls (`X-Api-Key` vs `X-API-Key`)
+- Request context injection (passing request_id downstream)
+- Authentication middleware patterns
 
 **Verification**:
 ```bash
-# Should work
+# Should work (valid key)
+$ curl -v -H "X-API-Key: valid-key-123" http://localhost:30420/get
+
+# Should reject (no key)
 $ curl -v http://localhost:30420/get
+# < HTTP/1.1 401 Unauthorized
 
-# Should stream without loading into memory
-$ curl http://localhost:30420/bytes/104857600 > /dev/null
+# Should reject (bad key)
+$ curl -v -H "X-API-Key: invalid" http://localhost:30420/get
+
+# Request ID present in logs
+$ go run cmd/gateway/main.go 2>&1 | grep "X-Request-ID"
 ```
 
-**Constraint**: Your implementation must handle 100MB download without >10MB RSS growth.
+**Constraint**: Log format must be parseable (space-delimited or JSON). Include request_id in response headers so clients can correlate.
+
+**Time estimate**: 2 hours (auth validation is the new piece here).
 
 ---
 
-## Kata 002: Headers, Identity & WebSockets
+## Kata 003: Path Routing for API Versioning (1.5 hours)
 
-**Goal**: Add gateway semantics without breaking the pipe.
+**Goal**: Route by path — critical for API evolution at Mailgun scale.
+
+**Why for Mailgun**: `/v3/messages` vs `/v4/messages` — versioned endpoints hit different backends.
 
 **Requirements**:
-- Strip client-sent `X-Forwarded-*` headers (security)
-- Generate and inject `X-Request-ID` (UUID v4)
-- Add `X-Forwarded-For` with actual client IP
-- Handle `Connection: Upgrade` for WebSocket passthrough
-- Add structured logging: `method path upstream status duration request_id`
+- `/v1/*` → `http://localhost:8001` (legacy API)
+- `/v3/*` → `http://localhost:8002` (current API)
+- `/v4/*` → `http://localhost:8003` (beta API)
+- `/*` (no version prefix) → `http://localhost:8002` (default to current)
+- Implement your own prefix matcher (map[string]http.Handler)
+- **Path stripping**: `/v3/messages` → upstream sees `/messages` (not `/v3/messages`)
 
 **What You'll Learn**:
-- `http.Hijacker` interface
-- Why WebSocket breaks your simple `io.Copy` model
-- Header canonicalization (`X-Request-Id` vs `X-Request-ID`)
+- Routing is pre-proxy decision
+- Path manipulation (strip version prefix before forwarding)
+- 404 vs 502 distinction (routing miss vs upstream down)
 
 **Verification**:
 ```bash
-# Regular request
-$ curl -v -H "X-Forwarded-Proto: evil" http://localhost:30420/get
-# Response should NOT contain your evil header back
+# Start test upstreams
+$ go run test/upstreams.go
 
-# WebSocket upgrade
-$ wscat -c ws://localhost:30420/ws
-# Should stay connected, echo messages
+$ curl http://localhost:30420/v1/domains    # → upstream-8001, sees /domains
+$ curl http://localhost:30420/v3/messages   # → upstream-8002, sees /messages
+$ curl http://localhost:30420/v4/webhooks   # → upstream-8003, sees /webhooks
+$ curl http://localhost:30420/messages      # → upstream-8002 (default)
+$ curl http://localhost:30420/v2/legacy     # → 404 (version not supported)
 ```
 
-**Constraint**: WebSocket must survive 5 minutes idle without 502.
+**Constraint**: Router reloadable via HTTP POST `/admin/reload` (no restart for adding new versions).
+
+**Time estimate**: 1.5 hours.
 
 ---
 
-## Kata 003: Path Routing (Triage)
+## Kata 004: SKIP
 
-**Goal**: Single gateway, multiple upstreams.
+Load balancing is infrastructure-level. Mailgun would use Envoy/HAProxy for this. Skip — not relevant to backend engineering interview.
+
+---
+
+## Kata 005: Rate Limiting (3 hours) — PRIORITY
+
+**Goal**: Protect upstream from abuse. **This is Mailgun's core business** (email sending quotas, API rate limits).
+
+**Why for Mailgun**: Customers have sending limits. Burst protection prevents noisy neighbors. 429 + `Retry-After` is the standard email API pattern.
 
 **Requirements**:
-- `/api/*` → `http://localhost:8001` (API server)
-- `/static/*` → `http://localhost:8002` (File server)  
-- `/*` → `http://localhost:8003` (Default app)
-- Implement your own routing table (map + prefix match)
-- NOW you may refactor to use `httputil.ReverseProxy` for the actual proxying
-- But routing decision must be YOUR code
+- Token bucket algorithm — **implement it yourself** (don't import)
+- Per-API-key rate limit: 100 req/min, burst 10 (match headers from Kata 002)
+- Return 429 with `Retry-After` header (seconds until next allowed request)
+- In-memory storage only (no Redis for kata scope)
+- Cleanup: evict stale buckets (keys inactive > 10 min)
 
 **What You'll Learn**:
-- Routing happens BEFORE proxy dial
-- Path stripping vs preserving (`/api/foo` → upstream sees `/foo` or `/api/foo`?)
-- Why you need a 404 vs 502 distinction
+- Token bucket math (fill rate vs capacity)
+- Per-key state tracking (map[string]*bucket with sync.RWMutex or sync.Map)
+- Why 429 + Retry-After matters for API clients (exponential backoff)
 
 **Verification**:
 ```bash
-# Starts 3 upstreams on 8001, 8002, 8003
-$ ./test-upstreams.sh &
+# 11 rapid requests with same API key
+$ for i in {1..11}; do curl -s -H "X-API-Key: test-123" http://localhost:30420/get; done
+# First 10: 200 OK
+# 11th: 429 Too Many Requests + Retry-After header
 
-$ curl http://localhost:30420/api/status  # → 8001
-$ curl http://localhost:30420/static/main.css  # → 8002  
-$ curl http://localhost:30420/  # → 8003
+# Wait Retry-After seconds, request works again
+$ curl -v -H "X-API-Key: test-123" http://localhost:30420/get
+# < HTTP/1.1 200 OK
 ```
 
-**Constraint**: Routing table reloadable without restart (inotify or HTTP POST to reload).
+**Constraint**: p99 latency overhead < 1ms. Rate limit check must be O(1).
+
+**Time estimate**: 3 hours (the hard kata — this is your differentiator for the interview).
 
 ---
 
-## Kata 004: Load Balancing & Health
+## Sunday: Polish & Interview Prep (1-2 hours)
 
-**Goal**: Single hostname, many backends.
+**Required**:
+- [ ] `go test ./...` passes with table-driven tests
+- [ ] README.md: Architecture diagram (ASCII or drawn), explain RBAC integration points
+- [ ] Be ready to discuss: "How would you add per-domain rate limits?" (Mailgun has domains)
+- [ ] Be ready to discuss: "How would you persist rate limits across restarts?" (Redis? DynamoDB?)
 
-**Requirements**:
-- `/api/*` routes to 3 upstreams: `[localhost:8001, localhost:8002, localhost:8003]`
-- Round-robin selection using atomic counter (no locks)
-- Health check: mark upstream unhealthy if 3 consecutive requests fail
-- Retry with different upstream on connection error (not 5xx response)
-- Expose `/health` endpoint showing upstream status
-
-**What You'll Learn**:
-- Connection pools vs per-request dials
-- Why atomic > mutex for simple counters
-- Health state machine (healthy → suspect → unhealthy)
-
-**Verification**:
-```bash
-# Kill one upstream
-$ kill $(lsof -ti:8002)
-
-# Requests should still succeed, routed to 8001/8003
-$ for i in {1..10}; do curl -s http://localhost:30420/api/status; done
-
-# Check health page
-$ curl http://localhost:30420/health
-# Shows 8002 as unhealthy
-```
-
-**Constraint**: Failed upstream must be retried within 50ms, total p99 latency <200ms with one down node.
+**Optional stretch** (if time permits):
+- Webhook signature validation (HMAC-SHA256) — simulates Shopify webhook integration
 
 ---
 
-## Kata 005: Rate Limiting & Resilience (Bonus)
+## RBAC Relevance for Interview
 
-**Goal**: Protect upstream from abuse.
+**During interview, connect these katas to Mailgun's needs**:
 
-**Requirements**:
-- Per-IP rate limit: 100 req/min, burst 10
-- Return 429 with `Retry-After` header
-- Circuit breaker: if upstream error rate >50%, bypass for 10s
-- Graceful shutdown: drain in-flight requests on SIGTERM
+| Kata | Mailgun Parallel |
+|------|------------------|
+| API Key validation | Customer auth, domain-level permissions |
+| Request ID | Tracing emails through pipeline (message-id correlation) |
+| Rate limiting | Sending quotas, burst protection, plan enforcement |
+| Path routing | API versioning, webhook endpoints |
 
-**What You'll Learn**:
-- Token bucket algorithm (implement it, don't import)
-- Circuit breaker state transitions
-- `http.Server.Shutdown` vs `http.Server.Close`
-
----
-
-## Directory Structure
-
-```
-go-api-gw/
-├── KATA.md              # This file
-├── cmd/
-│   └── gateway/
-│       └── main.go      # Your entry point (you write this)
-├── pkg/
-│   ├── proxy/           # Kata 001-002
-│   ├── router/          # Kata 003
-│   ├── balancer/        # Kata 004
-│   └── ratelimit/       # Kata 005
-├── test/
-│   └── upstreams.go     # Test servers (I can provide this)
-└── go.mod
-```
-
-**Rule**: Commit after each Kata. Tag it: `git tag kata-001` etc.
+**Questions to anticipate**:
+- "How would you validate webhook signatures from Shopify?" → HMAC validation middleware, similar to your API key check
+- "How do you handle per-customer rate limits at scale?" → Token bucket + Redis cluster, similar to your in-memory approach but distributed
+- "What happens when a customer hits their quota?" → 429 + Retry-After, exactly what you implemented
 
 ---
 
 ## Anti-Goals (Don't Do These)
 
-- ❌ Use Gin, Echo, Chi, or any framework
-- ❌ Use `httputil.ReverseProxy` before Kata 003
-- ❌ Import a rate limiter library (write the token bucket)
-- ❌ Use Kubernetes/Docker for testing (local processes only)
-- ❌ TLS termination (out of scope, Caddy does this upstream)
+- ❌ WebSockets — irrelevant to email APIs
+- ❌ Load balancing — Mailgun uses dedicated infrastructure
+- ❌ TLS termination — Out of scope, done at edge
+- ❌ Import rate limiter libraries — Implement token bucket yourself
 
 ---
 
-## Evaluation Checklist
+## Priority Order for Remaining Time
 
-Before moving to next Kata:
-
-- [ ] Code compiles with `go build ./...`
-- [ ] `go test ./...` passes (write table-driven tests)
-- [ ] `curl` test commands succeed
-- [ ] Memory stable under `wrk` load test
-- [ ] WebSocket survives 5min (if applicable)
+**Saturday evening (2 hours)**: Kata 002 (headers, auth, logging)
+**Sunday morning (1.5 hours)**: Kata 003 (path routing)
+**Sunday midday-afternoon (3 hours)**: Kata 005 (rate limiting — your talking point)
+**Sunday evening (1-2 hours)**: Tests, README, interview prep
 
 ---
 
-## Resources (Read In Order)
+## Done Definition
 
-1. `go doc net/http/httputil ReverseProxy` — read the source, it's short
-2. RFC 7230 Section 5 — Message Routing (the actual spec)
-3. Cloudflare blog: "How We Built Rate Limiting..." (for Kata 005)
-4. Go Concurrency Patterns: Context — for cancellation propagation
-
----
-
-## Need Help?
-
-Ask about:
-- Specific interface signatures to implement
-- How to test a specific edge case
-- Whether your approach matches Go idioms
-
-Don't ask for:
-- Complete working implementations
-- "Best practice" library recommendations
-- Code reviews of working code (do that after you finish)
+- All katas compile: `go build ./...`
+- All katas tested: `go test ./...`
+- `curl` verification commands pass
+- Can explain architecture and tradeoffs in interview
+- Tagged releases: `git tag kata-002`, `git tag kata-003`, `git tag kata-005`
